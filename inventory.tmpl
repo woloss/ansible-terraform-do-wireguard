@@ -1,0 +1,4 @@
+[wireguard]
+%{ for host_name in host_name ~}
+${host_name}
+%{ endfor ~}

@@ -1,0 +1,139 @@
+- hosts: "wireguard"
+
+  vars:
+    package_name: wireguard
+    wireguard_address: 10.40.0.1/24
+    wireguard_listenport: 51820
+    wireguard_nat_interface: eth0
+
+  become: true
+
+  tasks:
+    - name: Update repositories cache and install "{{ package_name }}" package
+      apt:
+        name: python3-pip
+        update_cache: yes
+
+    - name: install netaddr
+      shell: pip install netaddr
+
+    - name: Check wireguard interface availability
+      shell: wg-quick down wg0
+      ignore_errors: yes
+
+    - name: Update repositories cache and install "{{ package_name }}" package
+      apt:
+        name: "{{ package_name }}"
+        update_cache: yes
+      #become: true
+
+    - name: Create Public and Private keys
+      shell: wg genkey | sudo tee /etc/wireguard/privatekey | wg pubkey | sudo tee /etc/wireguard/publickey
+
+    - name: Create Public and Private keys for Peer
+      shell: wg genkey | sudo tee /etc/wireguard/privatekey_peer | wg pubkey | sudo tee /etc/wireguard/publickey_peer
+
+    - name: Create Preshared Key
+      shell: wg genpsk | sudo tee /etc/wireguard/preshared
+
+    - name: Get Preshared Key
+      slurp:
+        src: /etc/wireguard/preshared
+      register: preshared
+
+    - name: Get Private Key - Server
+      slurp:
+        src: /etc/wireguard/privatekey
+      register: private_key_server
+
+    - name: Get Public Key - Server
+      slurp:
+        src: /etc/wireguard/publickey
+      register: public_key_server
+
+    - name: Get Private Key - Client
+      slurp:
+        src: /etc/wireguard/privatekey_peer
+      register: private_key_client
+
+    - name: Get Public Key - Client
+      slurp:
+        src: /etc/wireguard/publickey_peer
+      register: public_key_client
+
+    - name: Create Wireguard config file
+      copy:
+        dest: /etc/wireguard/wg0.conf
+        content: |
+          [Interface]
+          Address = {{ wireguard_address }}
+          SaveConfig = true
+          ListenPort = {{ wireguard_listenport }}
+          PrivateKey = {{ private_key_server['content'] | b64decode }}
+          PostUp = iptables -A FORWARD -i %i -j ACCEPT; iptables -t nat -A POSTROUTING -o {{ wireguard_nat_interface }} -j MASQUERADE
+          PostDown = iptables -D FORWARD -i %i -j ACCEPT; iptables -t nat -D POSTROUTING -o {{ wireguard_nat_interface }} -j MASQUERADE
+
+          [Peer]
+          PublicKey = {{ public_key_client['content'] | b64decode }}
+          AllowedIPs = {{ wireguard_address | ipmath(1) }}/32
+
+    #    [Peer]
+    #    PresharedKey = preshared output
+    - name: Set permissions for config and private key
+      file:
+        path: "{{ item }}"
+        mode: 600
+      loop:
+        - /etc/wireguard/wg0.conf
+        - /etc/wireguard/privatekey
+
+    - name: Allow Wireguard port
+      ufw:
+        rule: allow
+        port: "{{ wireguard_listenport }}"
+        proto: udp
+
+    - name: Launch wg-quick  up wg0
+      shell: wg-quick up wg0
+
+    - name: Enable wg0 interface at boot
+      shell: systemctl enable wg-quick@wg0
+
+    - name: IP forwarding for NAT
+      sysctl:
+        name: net.ipv4.ip_forward
+        value: '1'
+        state: 'present'
+        sysctl_set: yes
+
+
+    # - name: Apply IP forward
+    #   shell: sysctl -p
+
+    - name: Create Wireguard Client config
+      copy:
+        dest: /etc/wireguard/client.conf
+        content: |
+          [Interface]
+          Address = {{ wireguard_address | ipmath(1) }}/32
+          PrivateKey = {{ private_key_client['content'] | b64decode }}
+          DNS = 8.8.8.8
+
+          [Peer]
+          PublicKey = {{ public_key_server['content'] | b64decode }}
+          Endpoint = {{ ansible_default_ipv4.address }}:{{ wireguard_listenport }}
+          AllowedIPs = 0.0.0.0/0, ::/0
+
+    - name: Remove private client key
+      file:
+        path: /etc/wireguard/privatekey_peer
+        state: absent
+
+
+#generate QR qrencode -t ansiutf8 < $1.conf
+#qrencode -t png -o $1.png -r $1.conf
+    # - debug:
+    #     msg: "Client public key -{{ key_public }}"
+
+    # - debug:
+    #     msg: "Server public key - {{ public_key_server }}"
